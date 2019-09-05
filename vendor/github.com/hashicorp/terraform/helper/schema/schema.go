@@ -112,6 +112,7 @@ type Schema struct {
 	// or map equality - for example SSH public keys may be considered
 	// equivalent regardless of trailing whitespace.
 	DiffSuppressFunc SchemaDiffSuppressFunc
+	DiffSuppressEffectfulFunc SchemaDiffSuppressEffectfulFunc
 
 	// If this is non-nil, then this will be a default value that is used
 	// when this item is not set in the configuration.
@@ -266,6 +267,7 @@ const (
 //
 // Return true if the diff should be suppressed, false to retain it.
 type SchemaDiffSuppressFunc func(k, old, new string, d *ResourceData) bool
+type SchemaDiffSuppressEffectfulFunc func(k, old, new string, d *ResourceData, meta interface{}) (bool, error)
 
 // SchemaDefaultFunc is a function called to return a default value for
 // a field.
@@ -488,7 +490,7 @@ func (m schemaMap) Diff(
 	}
 
 	for k, schema := range m {
-		err := m.diff(k, schema, result, d, false)
+		err := m.diff(k, schema, result, d, false, meta)
 		if err != nil {
 			return nil, err
 		}
@@ -510,7 +512,7 @@ func (m schemaMap) Diff(
 			return nil, err
 		}
 		for _, k := range rd.UpdatedKeys() {
-			err := m.diff(k, mc[k], result, rd, false)
+			err := m.diff(k, mc[k], result, rd, false, meta)
 			if err != nil {
 				return nil, err
 			}
@@ -537,7 +539,7 @@ func (m schemaMap) Diff(
 
 			// Perform the diff again
 			for k, schema := range m {
-				err := m.diff(k, schema, result2, d, false)
+				err := m.diff(k, schema, result2, d, false, meta)
 				if err != nil {
 					return nil, err
 				}
@@ -551,7 +553,7 @@ func (m schemaMap) Diff(
 					return nil, err
 				}
 				for _, k := range rd.UpdatedKeys() {
-					err := m.diff(k, mc[k], result2, rd, false)
+					err := m.diff(k, mc[k], result2, rd, false, meta)
 					if err != nil {
 						return nil, err
 					}
@@ -867,7 +869,8 @@ func (m schemaMap) diff(
 	schema *Schema,
 	diff *terraform.InstanceDiff,
 	d resourceDiffer,
-	all bool) error {
+	all bool,
+	meta interface{}) error {
 
 	unsupressedDiff := new(terraform.InstanceDiff)
 	unsupressedDiff.Attributes = make(map[string]*terraform.ResourceAttrDiff)
@@ -877,11 +880,11 @@ func (m schemaMap) diff(
 	case TypeBool, TypeInt, TypeFloat, TypeString:
 		err = m.diffString(k, schema, unsupressedDiff, d, all)
 	case TypeList:
-		err = m.diffList(k, schema, unsupressedDiff, d, all)
+		err = m.diffList(k, schema, unsupressedDiff, d, all, meta)
 	case TypeMap:
 		err = m.diffMap(k, schema, unsupressedDiff, d, all)
 	case TypeSet:
-		err = m.diffSet(k, schema, unsupressedDiff, d, all)
+		err = m.diffSet(k, schema, unsupressedDiff, d, all, meta)
 	default:
 		err = fmt.Errorf("%s: unknown type %#v", k, schema.Type)
 	}
@@ -889,8 +892,23 @@ func (m schemaMap) diff(
 	for attrK, attrV := range unsupressedDiff.Attributes {
 		switch rd := d.(type) {
 		case *ResourceData:
-			if schema.DiffSuppressFunc != nil && attrV != nil &&
-				schema.DiffSuppressFunc(attrK, attrV.Old, attrV.New, rd) {
+			if attrV == nil {
+				continue
+			}
+
+			var supress bool = false
+			if schema.DiffSuppressFunc != nil {
+				supress = schema.DiffSuppressFunc(attrK, attrV.Old, attrV.New, rd)
+			}
+
+			if !supress && schema.DiffSuppressEffectfulFunc != nil {
+				supress, err = schema.DiffSuppressEffectfulFunc(attrK, attrV.Old, attrV.New, rd, meta)
+				if err != nil {
+					return err
+				}
+			}
+
+			if supress {
 				// If this attr diff is suppressed, we may still need it in the
 				// overall diff if it's contained within a set. Rather than
 				// dropping the diff, make it a NOOP.
@@ -915,7 +933,8 @@ func (m schemaMap) diffList(
 	schema *Schema,
 	diff *terraform.InstanceDiff,
 	d resourceDiffer,
-	all bool) error {
+	all bool,
+	meta interface{}) error {
 	o, n, _, computedList, customized := d.diffChange(k)
 	if computedList {
 		n = nil
@@ -1004,7 +1023,7 @@ func (m schemaMap) diffList(
 		for i := 0; i < maxLen; i++ {
 			for k2, schema := range t.Schema {
 				subK := fmt.Sprintf("%s.%d.%s", k, i, k2)
-				err := m.diff(subK, schema, diff, d, all)
+				err := m.diff(subK, schema, diff, d, all, meta)
 				if err != nil {
 					return err
 				}
@@ -1020,7 +1039,7 @@ func (m schemaMap) diffList(
 		// just diff each.
 		for i := 0; i < maxLen; i++ {
 			subK := fmt.Sprintf("%s.%d", k, i)
-			err := m.diff(subK, &t2, diff, d, all)
+			err := m.diff(subK, &t2, diff, d, all, meta)
 			if err != nil {
 				return err
 			}
@@ -1138,7 +1157,8 @@ func (m schemaMap) diffSet(
 	schema *Schema,
 	diff *terraform.InstanceDiff,
 	d resourceDiffer,
-	all bool) error {
+	all bool,
+	meta interface{}) error {
 
 	o, n, _, computedSet, customized := d.diffChange(k)
 	if computedSet {
@@ -1233,7 +1253,7 @@ func (m schemaMap) diffSet(
 				// This is a complex resource
 				for k2, schema := range t.Schema {
 					subK := fmt.Sprintf("%s.%s.%s", k, code, k2)
-					err := m.diff(subK, schema, diff, d, true)
+					err := m.diff(subK, schema, diff, d, true, meta)
 					if err != nil {
 						return err
 					}
@@ -1247,7 +1267,7 @@ func (m schemaMap) diffSet(
 				// This is just a primitive element, so go through each and
 				// just diff each.
 				subK := fmt.Sprintf("%s.%s", k, code)
-				err := m.diff(subK, &t2, diff, d, true)
+				err := m.diff(subK, &t2, diff, d, true, meta)
 				if err != nil {
 					return err
 				}
