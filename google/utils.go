@@ -71,6 +71,17 @@ func getProjectFromDiff(d *schema.ResourceDiff, config *Config) (string, error) 
 	return "", fmt.Errorf("%s: required field is not set", "project")
 }
 
+func getProjectFromData(d *schema.ResourceData, config *Config) (string, error) {
+	res, ok := d.GetOk("project")
+	if ok {
+		return res.(string), nil
+	}
+	if config != nil && config.Project != "" {
+		return config.Project, nil
+	}
+	return "", fmt.Errorf("%s: required field is not set", "project")
+}
+
 func getRouterLockName(region string, router string) string {
 	return fmt.Sprintf("router/%s/%s", region, router)
 }

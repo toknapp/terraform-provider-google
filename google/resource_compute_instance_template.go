@@ -20,7 +20,6 @@ func resourceComputeInstanceTemplate() *schema.Resource {
 			State: schema.ImportStatePassthrough,
 		},
 		SchemaVersion: 1,
-		CustomizeDiff: resourceComputeInstanceTemplateSourceImageCustomizeDiff,
 		MigrateState:  resourceComputeInstanceTemplateMigrateState,
 
 		// A compute instance template is more or less a subset of a compute
@@ -111,7 +110,8 @@ func resourceComputeInstanceTemplate() *schema.Resource {
 						"source_image": {
 							Type:     schema.TypeString,
 							Optional: true,
-							Computed: true,
+							ForceNew: true,
+							DiffSuppressEffectfulFunc: resourceComputeInstanceTemplateSourceImageSupressDiff,
 						},
 
 						"interface": {
@@ -485,60 +485,37 @@ func resourceComputeInstanceTemplate() *schema.Resource {
 	}
 }
 
-func resourceComputeInstanceTemplateSourceImageCustomizeDiff(diff *schema.ResourceDiff, meta interface{}) error {
+func resourceComputeInstanceTemplateSourceImageSupressDiff(k, old, new string, d *schema.ResourceData, meta interface{}) (bool, error) {
+	if(old == "" || new == "") {
+		return false, nil;
+	}
+
 	config := meta.(*Config)
 
-	numDisks := diff.Get("disk.#").(int)
-	for i := 0; i < numDisks; i++ {
-		key := fmt.Sprintf("disk.%d.source_image", i)
-		if diff.HasChange(key) {
-			var err error
-			old, new := diff.GetChange(key)
-			if old == "" || new == "" {
-				// no sense in resolving empty strings
-				err = diff.ForceNew(key)
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			// project must be retrieved once we know there is a diff to resolve, otherwise it will
-			// attempt to retrieve project during `plan` before all calculated fields are ready
-			// see https://github.com/terraform-providers/terraform-provider-google/issues/2878
-			project, err := getProjectFromDiff(diff, config)
-			if err != nil {
-				return err
-			}
-			oldResolved, err := resolveImage(config, project, old.(string))
-			if err != nil {
-				return err
-			}
-			oldResolved, err = resolvedImageSelfLink(project, oldResolved)
-			if err != nil {
-				return err
-			}
-			newResolved, err := resolveImage(config, project, new.(string))
-			if err != nil {
-				return err
-			}
-			newResolved, err = resolvedImageSelfLink(project, newResolved)
-			if err != nil {
-				return err
-			}
-			if oldResolved != newResolved {
-				err = diff.ForceNew(key)
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			err = diff.Clear(key)
-			if err != nil {
-				return err
-			}
-		}
+	project, err := getProjectFromData(d, config)
+	if err != nil {
+		return false, err;
 	}
-	return nil
+
+	oldResolved, err := resolveImage(config, project, old)
+	if err != nil {
+		return false, err;
+	}
+	old, err = resolvedImageSelfLink(project, oldResolved)
+	if err != nil {
+		return false, err;
+	}
+
+	newResolved, err := resolveImage(config, project, new)
+	if err != nil {
+		return false, err;
+	}
+	new, err = resolvedImageSelfLink(project, newResolved)
+	if err != nil {
+		return false, err;
+	}
+
+	return (new == old), nil
 }
 
 func buildDisks(d *schema.ResourceData, config *Config) ([]*computeBeta.AttachedDisk, error) {
