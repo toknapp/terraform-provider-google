@@ -736,6 +736,36 @@ func TestAccComputeInstanceTemplate_shieldedVmConfig2(t *testing.T) {
 	})
 }
 
+func TestAccComputeInstanceTemplate_changeSourceImage(t *testing.T) {
+	t.Parallel()
+
+	var instanceTemplate compute.InstanceTemplate
+
+	var salt = acctest.RandString(10)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckComputeInstanceTemplateDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccComputeInstanceTemplate_changeSourceImage(salt, acctest.RandString(10)),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckComputeInstanceTemplateExists(
+						"google_compute_instance_template.foobar", &instanceTemplate),
+				),
+			},
+			{
+				Config: testAccComputeInstanceTemplate_changeSourceImage(salt, acctest.RandString(10)),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckComputeInstanceTemplateExists(
+						"google_compute_instance_template.foobar", &instanceTemplate),
+				),
+			},
+		},
+	})
+}
+
 func testAccCheckComputeInstanceTemplateDestroy(s *terraform.State) error {
 	config := testAccProvider.Meta().(*Config)
 
@@ -1867,4 +1897,31 @@ resource "google_compute_instance_template" "foobar" {
 		enable_integrity_monitoring = %t
 	}
 }`, acctest.RandString(10), enableSecureBoot, enableVtpm, enableIntegrityMonitoring)
+}
+
+func testAccComputeInstanceTemplate_changeSourceImage(template string, image string) string {
+	return fmt.Sprintf(`
+resource "google_compute_image" "%s" {
+	name = "instancet-test-%s"
+	family = "family-test"
+	raw_disk {
+	  source = "https://storage.googleapis.com/bosh-cpi-artifacts/bosh-stemcell-3262.4-google-kvm-ubuntu-trusty-go_agent-raw.tar.gz"
+	}
+}
+
+resource "google_compute_instance_template" "foobar" {
+	name = "instancet-test-%s"
+	machine_type = "n1-standard-1"
+
+	disk {
+		source_image = google_compute_image.%s.self_link
+		auto_delete = true
+		boot = true
+	}
+
+	network_interface {
+		network = "default"
+	}
+
+}`, image, image, template, image)
 }
